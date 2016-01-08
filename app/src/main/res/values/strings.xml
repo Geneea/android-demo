@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">GeneeaDroid</string>
+
+    <string name="action_analyze">Analyze</string>
+    <string name="action_settings">Settings</string>
+
+    <string name="analyze_hint">Enter text to be analyzed</string>
+    <string name="error_text_required">The text is required</string>
+</resources>
