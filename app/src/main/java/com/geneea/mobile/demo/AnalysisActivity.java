@@ -1,39 +1,60 @@
 package com.geneea.mobile.demo;
 
+import com.geneea.mobile.demo.model.EntitiesResponse;
+import com.geneea.mobile.demo.model.Request;
+import com.geneea.mobile.demo.model.SentimentResponse;
+
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
+import android.content.Intent;
 import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
 import android.support.v7.app.AppCompatActivity;
 import android.text.TextUtils;
 import android.view.KeyEvent;
-import android.view.Menu;
-import android.view.MenuItem;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.Spinner;
 import android.widget.TextView;
+import retrofit.Call;
+import retrofit.GsonConverterFactory;
+import retrofit.Response;
+import retrofit.Retrofit;
 
-public class InputActivity extends AppCompatActivity {
+import java.io.IOException;
+
+/**
+ * A main activity used for running the NLP analysis.
+ */
+public class AnalysisActivity extends AppCompatActivity {
 
     /**
      * Keep track of the analysis task to ensure we can cancel it if requested.
      */
-    private AnalysisTask mAnalysisTask = null;
+    private AnalysisTask analysisTask = null;
+
+    private GeneeaAPI geneeaAPI;
+    private String authorization;
 
     // UI references
-    private EditText mTextToAnalyze;
     private View mProgressView;
     private View mAnalysisFormView;
+    private EditText mTextToAnalyze;
+    private Spinner mAnalysisLanguage;
 
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_input);
-        setupActionBar();
 
+        mAnalysisFormView = findViewById(R.id.analysis_form);
+        mProgressView = findViewById(R.id.analysis_progress);
+
+        // setup the call-backs for running the analysis
         mTextToAnalyze = (EditText) findViewById(R.id.analysis_input);
         mTextToAnalyze.setOnEditorActionListener(new TextView.OnEditorActionListener() {
             @Override
@@ -45,7 +66,6 @@ public class InputActivity extends AppCompatActivity {
                 return false;
             }
         });
-
         final Button mAnalyzeButton = (Button) findViewById(R.id.analyze_button);
         mAnalyzeButton.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -54,40 +74,21 @@ public class InputActivity extends AppCompatActivity {
             }
         });
 
-        mAnalysisFormView = findViewById(R.id.analysis_form);
-        mProgressView = findViewById(R.id.analysis_progress);
-    }
+        // setup the languages spinner
+        mAnalysisLanguage = (Spinner) findViewById(R.id.analysis_language);
+        final ArrayAdapter<CharSequence> adapter = ArrayAdapter.createFromResource(
+                this, R.array.languages, android.R.layout.simple_spinner_item
+        );
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        mAnalysisLanguage.setAdapter(adapter);
 
-    @Override
-    public boolean onCreateOptionsMenu(final Menu menu) {
-        // Inflate the menu; this adds items to the action bar if it is present.
-        getMenuInflater().inflate(R.menu.menu_input, menu);
-        return true;
-    }
-
-    @Override
-    public boolean onOptionsItemSelected(final MenuItem item) {
-        // Handle action bar item clicks here. The action bar will
-        // automatically handle clicks on the Home/Up button, so long
-        // as you specify a parent activity in AndroidManifest.xml.
-        final int id = item.getItemId();
-
-        //noinspection SimplifiableIfStatement
-        if (id == R.id.action_settings) {
-            return true;
-        }
-
-        return super.onOptionsItemSelected(item);
-    }
-
-    /**
-     * Set up the {@link android.app.ActionBar}, if the API is available.
-     */
-    private void setupActionBar() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB) {
-            // Show the Up button in the action bar.
-            getSupportActionBar().setDisplayHomeAsUpEnabled(true);
-        }
+        // create a REST API client using the Retrofit lib
+        final Retrofit retrofit = new Retrofit.Builder()
+                .baseUrl(getString(R.string.rest_api_host))
+                .addConverterFactory(GsonConverterFactory.create())
+                .build();
+        geneeaAPI = retrofit.create(GeneeaAPI.class);
+        authorization = getString(R.string.authorization);
     }
 
     /**
@@ -133,54 +134,100 @@ public class InputActivity extends AppCompatActivity {
      * Calls the analysis API.
      */
     private void runAnalysis() {
-        if (mAnalysisTask != null) {
+        if (analysisTask != null) {
             return;
         }
 
         mTextToAnalyze.setError(null);
         final String text = mTextToAnalyze.getText().toString();
 
+        final Object selectedItem = mAnalysisLanguage.getSelectedItem();
+        final String language = (selectedItem == null) ? null : selectedItem.toString();
+
         if (TextUtils.isEmpty(text)) {
             mTextToAnalyze.setError(getString(R.string.error_text_required));
             mAnalysisFormView.requestFocus();
         } else {
-            // Show a progress spinner, and kick off a background task to
-            // perform the user login attempt.
+            // Show a progress spinner, and kick off an analysis task
             showProgress(true);
-            mAnalysisTask = new AnalysisTask();
-            mAnalysisTask.execute(text);
+            analysisTask = new AnalysisTask();
+            analysisTask.execute(text, language);
         }
     }
 
     /**
+     * Shows the results using {@link ShowResultsActivity}.
+     */
+    private void showResults(final EntitiesResponse entities, final SentimentResponse sentiment) {
+        // start the result visualization activity
+        final Intent intent = new Intent(getBaseContext(), ShowResultsActivity.class);
+        intent.putExtra(ShowResultsActivity.ENTITIES_PARAM_NAME, entities);
+        intent.putExtra(ShowResultsActivity.SENTIMENT_PARAM_NAME, sentiment);
+        startActivity(intent);
+    }
+
+    /**
      * Represents an asynchronous analysis task.
+     * <p>{@code (text, language) -> success}</p>
      */
     private class AnalysisTask extends AsyncTask<String, Void, Boolean> {
 
+        private Call<EntitiesResponse> entitiesCall;
+        private Response<EntitiesResponse> entitiesResponse;
+
+        private Call<SentimentResponse> sentimentCall;
+        private Response<SentimentResponse> sentimentResponse;
+
         @Override
         protected Boolean doInBackground(final String... params) {
-            // TODO: call API here
+            // prepare the analysis request
+            final String text = (params.length > 0) ? params[0] : null;
+            final String language = (params.length > 1) ? params[1] : null;
+            final Request request = new Request(text, language);
 
             try {
-                Thread.sleep(4_000L);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
+                // call the entity detection
+                entitiesCall = geneeaAPI.findEntities(authorization, request);
+                entitiesResponse = entitiesCall.execute();
+                if (!entitiesResponse.isSuccess()) {
+                    return false;
+                }
+
+                // call the sentiment analysis
+                sentimentCall = geneeaAPI.detectSentiment(authorization, request);
+                sentimentResponse = sentimentCall.execute();
+                if (!sentimentResponse.isSuccess()) {
+                    return false;
+                }
+            } catch (IOException e) {
+                return false;
             }
 
+            // success
             return true;
         }
 
         @Override
         protected void onPostExecute(final Boolean success) {
-            mAnalysisTask = null;
+            if (success) {
+                showResults(entitiesResponse.body(), sentimentResponse.body());
+            } else {
+                mTextToAnalyze.setError(getString(R.string.error_analysis_fail));
+            }
             showProgress(false);
-            finish();
+            analysisTask = null;
         }
 
         @Override
         protected void onCancelled() {
-            mAnalysisTask = null;
+            if (entitiesCall != null) {
+                entitiesCall.cancel();
+            }
+            if (sentimentCall != null) {
+                sentimentCall.cancel();
+            }
             showProgress(false);
+            analysisTask = null;
         }
     }
 }
